@@ -22,7 +22,6 @@ jobs:
           if [ -z "$SETTINGS" ]; then echo "ERROR: settings.gradle nahi mili"; exit 1; fi
           PROJECT_DIR=$(dirname "$SETTINGS")
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "Project dir: $PROJECT_DIR"
           ls -la "$PROJECT_DIR"
 
       - name: Set up JDK 17
@@ -36,8 +35,12 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Prepare Android SDK
+        run: |
+          export ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          echo "SDK root: $ANDROID_SDK_ROOT"
+          yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
 
       - name: Check editor JavaScript syntax
         run: node --check "$PROJECT_DIR/app/src/main/assets/mnshot.js"
