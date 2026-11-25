@@ -1,99 +1,88 @@
-name: Build MN SHOT APK
+name: MN SHOT Android APK Build
+
 on:
   workflow_dispatch:
   push:
-    branches: [ main, master ]
-  pull_request:
-    branches: [ main, master ]
+    branches:
+      - main
+
+permissions:
+  contents: read
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    env:
-      ANDROID_HOME: /usr/local/lib/android/sdk
-      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Extract project zip
-        run: |
-          ZIP=$(find .. -maxdepth 3 -name "*.zip" | head -n 1)
-          if [ -z "$ZIP" ]; then
-            ZIP=$(find . -maxdepth 3 -name "*.zip" | head -n 1)
-          fi
-          echo "Zip found: $ZIP"
-          if [ -z "$ZIP" ]; then
-            echo "ERROR: ZIP file nahi mili"
-            exit 1
-          fi
-
-          rm -rf _mn_extract_tmp
-          mkdir -p _mn_extract_tmp
-          unzip -qo "$ZIP" -d _mn_extract_tmp
-
-          PROJ_ROOT=$(find _mn_extract_tmp -name "settings.gradle" -o -name "settings.gradle.kts" | head -n 1 | xargs -r dirname)
-          if [ -z "$PROJ_ROOT" ]; then
-            echo "ERROR: ZIP ke andar settings.gradle nahi mili"
-            exit 1
-          fi
-
-          shopt -s dotglob nullglob
-          for item in "$PROJ_ROOT"/*; do
-            base=$(basename "$item")
-            if [ "$base" != ".github" ] && [ "$base" != "_mn_extract_tmp" ]; then
-              rm -rf "./$base"
-              mv "$item" "./$base"
-            fi
-          done
-          rm -rf _mn_extract_tmp
-
-          test -f "settings.gradle" || test -f "settings.gradle.kts"
-          echo "settings.gradle root mein mil gayi."
-
-      - name: Set up JDK 17
+      - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Gradle 8.9
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.9'
-
-      - name: Set up Android SDK
+      - name: Prepare project files
+        shell: bash
         run: |
-          mkdir -p "$ANDROID_HOME/licenses"
-          printf "8933bad161af4178b1185d1a37fbf41ea5269c55\n" > "$ANDROID_HOME/licenses/android-sdk-license"
-          printf "d56f5fd8747e418259514041d46d7a0a77007052\n24333f8a63b6825ea9c5514f83c2829b004d1fee\n" > "$ANDROID_HOME/licenses/android-sdk-preview-license"
-          printf "84831b9409646a918e30573bab4c9c91346d8abd\n" > "$ANDROID_HOME/licenses/android-sdk-arm-dbt-license"
-          printf "33b6a2b64607f11b759f320ef9dff4ae5c47d97a\n" > "$ANDROID_HOME/licenses/google-gdk-license"
-          printf "601085b94cd77f0b54ff86406957099ebe79c4d6\n" > "$ANDROID_HOME/licenses/android-googletv-license"
-          printf "e9acab5b5fbb560a72cfaec410737de86342fb5f\n" > "$ANDROID_HOME/licenses/android-sdk-preview-license-old"
-          printf "79120722343a6f314e0719f863036c702b0e6b2a\n" > "$ANDROID_HOME/licenses/android-sdk-support-license"
-          printf "4433604543545556356643543366544545665433\n" > "$ANDROID_HOME/licenses/intel-android-extra-license"
+          set -e
 
-          SDKMANAGER=$(find "$ANDROID_HOME" -name "sdkmanager" -type f 2>/dev/null | head -n 1)
-          if [ -n "$SDKMANAGER" ]; then
-            yes | "$SDKMANAGER" --sdk_root="$ANDROID_HOME" "platform-tools" "platforms;android-35" "build-tools;35.0.0" >/dev/null 2>&1 || true
+          mkdir -p build_project
+
+          # If ZIP was uploaded to repository, extract it.
+          find . -maxdepth 3 -type f -name "*.zip" \
+            ! -path "./build_project/*" | while read zipfile; do
+              unzip -o "$zipfile" -d build_project
+            done
+
+          # Detect project folder
+          if [ -f "settings.gradle" ] || [ -f "settings.gradle.kts" ]; then
+            cp -r . build_project/root_project
           fi
 
-      - name: Verify project files
-        run: |
-          test -s app/src/main/AndroidManifest.xml
-          grep -q 'MN SHOT' app/src/main/AndroidManifest.xml
-          grep -q 'media3-transformer' app/build.gradle
-          test -f app/src/main/java/com/mnshot/studio/MainActivity.kt
-          test -f app/src/main/res/mipmap-xxxhdpi/ic_launcher.png
-          test -f app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml
+          PROJECT_DIR=""
 
-      - name: Build debug APK
-        run: gradle --no-daemon assembleDebug
+          if [ -f "build_project/phase19work/settings.gradle" ]; then
+            PROJECT_DIR="build_project/phase19work"
+          elif [ -f "build_project/phase19work/settings.gradle.kts" ]; then
+            PROJECT_DIR="build_project/phase19work"
+          else
+            PROJECT_DIR=$(find build_project -name settings.gradle \
+              -o -name settings.gradle.kts | head -1 | xargs dirname)
+          fi
+
+          if [ -z "$PROJECT_DIR" ] || [ ! -d "$PROJECT_DIR/app" ]; then
+            echo "Android project not found!"
+            exit 1
+          fi
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        run: |
+          sdkmanager "platforms;android-35"
+          sdkmanager "build-tools;35.0.0"
+          sdkmanager "platform-tools"
+
+      - name: Install Gradle 8.9
+        run: |
+          wget -q https://services.gradle.org/distributions/gradle-8.9-bin.zip
+          unzip -q gradle-8.9-bin.zip
+          echo "$PWD/gradle-8.9/bin" >> "$GITHUB_PATH"
+
+      - name: Build APK
+        run: |
+          cd "$PROJECT_DIR"
+          gradle assembleDebug --stacktrace
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: MN-SHOT-debug-apk
-          path: app/build/outputs/apk/debug/*.apk
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
           
