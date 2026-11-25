@@ -39,10 +39,8 @@ jobs:
           if [ ! -x "$SDKM" ]; then
             SDKM="$(find "$ANDROID_HOME/cmdline-tools" -name sdkmanager -type f | head -n 1)"
           fi
-          echo "Using sdkmanager: $SDKM"
           yes | "$SDKM" --licenses > /dev/null || true
           "$SDKM" "platform-tools" \
-                  "platforms;android-33" \
                   "platforms;android-34" \
                   "platforms;android-35" \
                   "build-tools;34.0.0" \
@@ -53,22 +51,26 @@ jobs:
           shopt -s nullglob
           zips=(*.zip)
           if [ ${#zips[@]} -eq 0 ]; then
-            echo "No ZIP found in repo root, using repo files directly."
+            echo "No ZIP found, using repo files directly."
             exit 0
           fi
           mkdir -p extracted
           for z in "${zips[@]}"; do
-            name="${z%.zip}"
-            dest="extracted/$name"
+            dest="extracted/${z%.zip}"
             mkdir -p "$dest"
-            echo "Extracting: $z -> $dest"
-            if ! unzip -o -q "$z" -d "$dest"; then
-              echo "::warning::Could not extract $z (file may be corrupted or incomplete). Skipping."
-              rm -rf "$dest"
+            echo "ZIP: $z ($(stat -c%s "$z") bytes)"
+            set +e
+            unzip -o -q "$z" -d "$dest"
+            rc=$?
+            set -e
+            echo "unzip exit code: $rc"
+            if [ $rc -gt 1 ]; then
+              echo "::warning::$z looks incomplete/corrupted. Re-upload the ZIP."
+              7z x -y -o"$dest" "$z" || true
             fi
+            echo "Files extracted: $(find "$dest" -type f | wc -l)"
           done
           rm -rf extracted/*/__MACOSX
-          ls -la extracted || true
 
       - name: Find Android project
         run: |
@@ -88,8 +90,7 @@ jobs:
           fi
 
           if [ -z "$PROJECT" ]; then
-            echo "::error::No Android project found (no gradlew / settings.gradle). Check your ZIP structure."
-            echo "Repo contents:"
+            echo "::error::No Android project found. ZIP incomplete ya structure galat hai."
             ls -la
             exit 1
           fi
@@ -97,26 +98,22 @@ jobs:
           echo "Android project: $PROJECT"
           echo "PROJECT_DIR=$PROJECT" >> "$GITHUB_ENV"
 
-      - name: Setup Gradle (only if project has no wrapper)
-        if: ${{ hashFiles('**/gradlew') == '' }}
+      - name: Setup Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: "8.7"
+          gradle-version: "8.9"
 
       - name: Build APK
         run: |
           cd "$PROJECT_DIR"
           echo "sdk.dir=$ANDROID_HOME" > local.properties
 
-          if [ -f gradlew ]; then
-            chmod +x gradlew
-            GRADLE="./gradlew"
-          else
-            GRADLE="gradle"
+          # Project ka wrapper (8.7) ignore karo, hamesha Gradle 8.9 use karo
+          if [ -f gradle/wrapper/gradle-wrapper.properties ]; then
+            sed -i 's#distributionUrl=.*#distributionUrl=https\\://services.gradle.org/distributions/gradle-8.9-all.zip#' gradle/wrapper/gradle-wrapper.properties
           fi
 
-          $GRADLE assembleDebug --stacktrace --no-daemon \
-            -Dorg.gradle.jvmargs="-Xmx3g -XX:MaxMetaspaceSize=512m"
+          gradle assembleDebug --stacktrace --no-daemon
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
