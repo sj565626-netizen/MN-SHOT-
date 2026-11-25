@@ -11,78 +11,118 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Java 17
+      - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install SDK components and accept licenses
+      - name: Locate Android SDK
         shell: bash
         run: |
-          set -euo pipefail
-          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-          if [ ! -x "$SDKMANAGER" ]; then
-            SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager -executable | head -n 1)
+          set -e
+
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+
+          if [ ! -d "$SDK" ]; then
+            SDK="/usr/local/android-sdk"
           fi
-          test -x "$SDKMANAGER"
-          yes | "$SDKMANAGER" --sdk_root="$ANDROID_HOME" --licenses || true
-          "$SDKMANAGER" --sdk_root="$ANDROID_HOME" "platform-tools" "platforms;android-35" "build-tools;35.0.0"
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          ls -la "$ANDROID_HOME/platforms"
 
-      - name: Find or extract Android project
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/mnshot-unpacked"
+          if [ ! -d "$SDK" ]; then
+            SDK=$(find /usr/local -type d -path "*/android/sdk" 2>/dev/null | head -1)
+          fi
 
-          while IFS= read -r -d '' z; do
-            unzip -oq "$z" -d "$RUNNER_TEMP/mnshot-unpacked"
-          done < <(find "$GITHUB_WORKSPACE" -type f -name '*.zip' -print0)
-
-          PROJECT=""
-          for ROOT in "$GITHUB_WORKSPACE" "$RUNNER_TEMP/mnshot-unpacked"; do
-            while IFS= read -r -d '' settings; do
-              candidate=$(dirname "$settings")
-              if [ -d "$candidate/app" ]; then
-                PROJECT="$candidate"
-                break 2
-              fi
-            done < <(find "$ROOT" -type f \( -name 'settings.gradle' -o -name 'settings.gradle.kts' \) -print0)
-          done
-
-          if [ -z "$PROJECT" ]; then
-            echo "ERROR: Could not locate Android project with app module."
-            find "$GITHUB_WORKSPACE" -maxdepth 4 -type f | head -200
+          if [ -z "$SDK" ] || [ ! -d "$SDK" ]; then
+            echo "Android SDK not found on runner"
             exit 1
           fi
 
-          echo "Found project: $PROJECT"
-          echo "PROJECT_DIR=$PROJECT" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          echo "$SDK/platform-tools" >> "$GITHUB_PATH"
 
-      - name: Build debug APK
+          echo "SDK located at $SDK"
+
+      - name: Install Android SDK packages
         shell: bash
         run: |
-          set -euo pipefail
-          cd "$PROJECT_DIR"
+          set -e
 
-          if [ -x ./gradlew ]; then
-            ./gradlew --no-daemon assembleDebug --stacktrace
-          else
-            wget -q https://services.gradle.org/distributions/gradle-8.9-bin.zip -O "$RUNNER_TEMP/gradle.zip"
-            unzip -q "$RUNNER_TEMP/gradle.zip" -d "$RUNNER_TEMP/gradle"
-            "$RUNNER_TEMP/gradle/gradle-8.9/bin/gradle" --no-daemon assembleDebug --stacktrace
+          SDKMANAGER=$(find "$ANDROID_HOME" -type f -name sdkmanager | head -1)
+
+          if [ -z "$SDKMANAGER" ]; then
+            echo "sdkmanager not found"
+            exit 1
           fi
 
-      - name: Upload debug APK artifact
+          yes | "$SDKMANAGER" --sdk_root="$ANDROID_HOME" --licenses || true
+
+          "$SDKMANAGER" --sdk_root="$ANDROID_HOME" \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
+
+      - name: Extract ZIP projects
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p "$RUNNER_TEMP/projects"
+
+          find "$GITHUB_WORKSPACE" -type f -name "*.zip" \
+            -print0 | while IFS= read -r -d '' zipfile; do
+              unzip -oq "$zipfile" -d "$RUNNER_TEMP/projects"
+            done
+
+      - name: Find Android project
+        shell: bash
+        run: |
+          set -e
+
+          PROJECT=""
+
+          while IFS= read -r settings; do
+            DIR=$(dirname "$settings")
+
+            if [ -d "$DIR/app" ]; then
+              PROJECT="$DIR"
+              break
+            fi
+          done < <(
+            find "$GITHUB_WORKSPACE" "$RUNNER_TEMP/projects" \
+              -type f \( -name "settings.gradle" \
+              -o -name "settings.gradle.kts" \)
+          )
+
+          if [ -z "$PROJECT" ]; then
+            echo "Android project not found"
+            exit 1
+          fi
+
+          echo "PROJECT_DIR=$PROJECT" >> "$GITHUB_ENV"
+          echo "Project: $PROJECT"
+
+      - name: Build APK
+        shell: bash
+        run: |
+          set -e
+          cd "$PROJECT_DIR"
+
+          if [ -f gradlew ]; then
+            chmod +x gradlew
+            ./gradlew assembleDebug --stacktrace
+          else
+            wget -q https://services.gradle.org/distributions/gradle-8.9-bin.zip
+            unzip -q gradle-8.9-bin.zip
+            ./gradle-8.9/bin/gradle assembleDebug --stacktrace
+          fi
+
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: MN-SHOT-debug-apk
