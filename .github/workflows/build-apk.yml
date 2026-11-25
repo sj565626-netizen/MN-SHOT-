@@ -3,8 +3,7 @@ name: MN SHOT Android APK Build
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
+    branches: [main]
 
 permissions:
   contents: read
@@ -12,77 +11,80 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Java 17
+      - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Prepare project files
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install SDK components and accept licenses
         shell: bash
         run: |
-          set -e
-
-          mkdir -p build_project
-
-          # If ZIP was uploaded to repository, extract it.
-          find . -maxdepth 3 -type f -name "*.zip" \
-            ! -path "./build_project/*" | while read zipfile; do
-              unzip -o "$zipfile" -d build_project
-            done
-
-          # Detect project folder
-          if [ -f "settings.gradle" ] || [ -f "settings.gradle.kts" ]; then
-            cp -r . build_project/root_project
+          set -euo pipefail
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager -executable | head -n 1)
           fi
+          test -x "$SDKMANAGER"
+          yes | "$SDKMANAGER" --sdk_root="$ANDROID_HOME" --licenses || true
+          "$SDKMANAGER" --sdk_root="$ANDROID_HOME" "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          ls -la "$ANDROID_HOME/platforms"
 
-          PROJECT_DIR=""
+      - name: Find or extract Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/mnshot-unpacked"
 
-          if [ -f "build_project/phase19work/settings.gradle" ]; then
-            PROJECT_DIR="build_project/phase19work"
-          elif [ -f "build_project/phase19work/settings.gradle.kts" ]; then
-            PROJECT_DIR="build_project/phase19work"
-          else
-            PROJECT_DIR=$(find build_project -name settings.gradle \
-              -o -name settings.gradle.kts | head -1 | xargs dirname)
-          fi
+          while IFS= read -r -d '' z; do
+            unzip -oq "$z" -d "$RUNNER_TEMP/mnshot-unpacked"
+          done < <(find "$GITHUB_WORKSPACE" -type f -name '*.zip' -print0)
 
-          if [ -z "$PROJECT_DIR" ] || [ ! -d "$PROJECT_DIR/app" ]; then
-            echo "Android project not found!"
+          PROJECT=""
+          for ROOT in "$GITHUB_WORKSPACE" "$RUNNER_TEMP/mnshot-unpacked"; do
+            while IFS= read -r -d '' settings; do
+              candidate=$(dirname "$settings")
+              if [ -d "$candidate/app" ]; then
+                PROJECT="$candidate"
+                break 2
+              fi
+            done < <(find "$ROOT" -type f \( -name 'settings.gradle' -o -name 'settings.gradle.kts' \) -print0)
+          done
+
+          if [ -z "$PROJECT" ]; then
+            echo "ERROR: Could not locate Android project with app module."
+            find "$GITHUB_WORKSPACE" -maxdepth 4 -type f | head -200
             exit 1
           fi
 
-          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Found project: $PROJECT"
+          echo "PROJECT_DIR=$PROJECT" >> "$GITHUB_ENV"
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK packages
+      - name: Build debug APK
+        shell: bash
         run: |
-          sdkmanager "platforms;android-35"
-          sdkmanager "build-tools;35.0.0"
-          sdkmanager "platform-tools"
-
-      - name: Install Gradle 8.9
-        run: |
-          wget -q https://services.gradle.org/distributions/gradle-8.9-bin.zip
-          unzip -q gradle-8.9-bin.zip
-          echo "$PWD/gradle-8.9/bin" >> "$GITHUB_PATH"
-
-      - name: Build APK
-        run: |
+          set -euo pipefail
           cd "$PROJECT_DIR"
-          gradle assembleDebug --stacktrace
 
-      - name: Upload APK
+          if [ -x ./gradlew ]; then
+            ./gradlew --no-daemon assembleDebug --stacktrace
+          else
+            wget -q https://services.gradle.org/distributions/gradle-8.9-bin.zip -O "$RUNNER_TEMP/gradle.zip"
+            unzip -q "$RUNNER_TEMP/gradle.zip" -d "$RUNNER_TEMP/gradle"
+            "$RUNNER_TEMP/gradle/gradle-8.9/bin/gradle" --no-daemon assembleDebug --stacktrace
+          fi
+
+      - name: Upload debug APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: MN-SHOT-debug-apk
           path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
-          
