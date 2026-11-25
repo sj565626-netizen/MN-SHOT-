@@ -3,6 +3,8 @@ on:
   workflow_dispatch:
   push:
     branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
 
 jobs:
   build:
@@ -13,16 +15,38 @@ jobs:
 
       - name: Extract project zip
         run: |
-          ZIP=$(find . -maxdepth 2 -iname '*.zip' | head -n 1)
-          if [ -z "$ZIP" ]; then echo "ERROR: repo mein koi .zip file nahi mili"; exit 1; fi
+          ZIP=$(find .. -maxdepth 3 -name "*.zip" | head -n 1)
+          if [ -z "$ZIP" ]; then
+            ZIP=$(find . -maxdepth 3 -name "*.zip" | head -n 1)
+          fi
           echo "Zip found: $ZIP"
-          mkdir -p project
-          unzip -q "$ZIP" -d project
-          SETTINGS=$(find project -name settings.gradle | head -n 1)
-          if [ -z "$SETTINGS" ]; then echo "ERROR: settings.gradle nahi mili"; exit 1; fi
-          PROJECT_DIR=$(dirname "$SETTINGS")
-          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          ls -la "$PROJECT_DIR"
+          if [ -z "$ZIP" ]; then
+            echo "ERROR: ZIP file nahi mili"
+            exit 1
+          fi
+
+          rm -rf _mn_extract_tmp
+          mkdir -p _mn_extract_tmp
+          unzip -qo "$ZIP" -d _mn_extract_tmp
+
+          PROJ_ROOT=$(find _mn_extract_tmp -name "settings.gradle" -o -name "settings.gradle.kts" | head -n 1 | xargs -r dirname)
+          if [ -z "$PROJ_ROOT" ]; then
+            echo "ERROR: ZIP ke andar settings.gradle nahi mili"
+            exit 1
+          fi
+
+          shopt -s dotglob nullglob
+          for item in "$PROJ_ROOT"/*; do
+            base=$(basename "$item")
+            if [ "$base" != ".github" ] && [ "$base" != "_mn_extract_tmp" ]; then
+              rm -rf "./$base"
+              mv "$item" "./$base"
+            fi
+          done
+          rm -rf _mn_extract_tmp
+
+          test -f "settings.gradle" || test -f "settings.gradle.kts"
+          echo "settings.gradle root mein mil gayi."
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -35,23 +59,24 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Prepare Android SDK
-        run: |
-          export ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
-          echo "SDK root: $ANDROID_SDK_ROOT"
-          yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
-          "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
 
-      - name: Check editor JavaScript syntax
-        run: node --check "$PROJECT_DIR/app/src/main/assets/mnshot.js"
+      - name: Verify project files
+        run: |
+          test -s app/src/main/AndroidManifest.xml
+          grep -q 'MN SHOT' app/src/main/AndroidManifest.xml
+          grep -q 'media3-transformer' app/build.gradle
+          test -f app/src/main/java/com/mnshot/studio/MainActivity.kt
+          test -f app/src/main/res/mipmap-xxxhdpi/ic_launcher.png
+          test -f app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml
 
       - name: Build debug APK
-        run: |
-          cd "$PROJECT_DIR"
-          gradle --no-daemon assembleDebug
+        run: gradle --no-daemon assembleDebug
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: MN-SHOT-debug-apk
-          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
+          path: app/build/outputs/apk/debug/*.apk
+          
