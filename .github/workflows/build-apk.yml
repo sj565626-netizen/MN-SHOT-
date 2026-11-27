@@ -1,125 +1,33 @@
-name: MN SHOT Android APK Build
-
+name: Build MN SHOT Native APK
 on:
-  push:
   workflow_dispatch:
-
-permissions:
-  contents: read
-
+  push:
+    branches: [ main, master ]
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Java 17
-        uses: actions/setup-java@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
-
-      - name: Locate Android SDK
-        run: |
-          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
-          if [ ! -d "$SDK" ]; then
-            echo "Android SDK not found at $SDK"
-            exit 1
-          fi
-          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
-          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
-          echo "SDK found: $SDK"
-
-      - name: Install Android SDK packages
-        run: |
-          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-          if [ ! -x "$SDKM" ]; then
-            SDKM="$(find "$ANDROID_HOME/cmdline-tools" -name sdkmanager -type f | head -n 1)"
-          fi
-          yes | "$SDKM" --licenses > /dev/null || true
-          "$SDKM" "platform-tools" \
-                  "platforms;android-34" \
-                  "platforms;android-35" \
-                  "build-tools;34.0.0" \
-                  "build-tools;35.0.0" > /dev/null
-
-      - name: Extract ZIP projects
-        run: |
-          shopt -s nullglob
-          zips=(*.zip)
-          if [ ${#zips[@]} -eq 0 ]; then
-            echo "No ZIP found, using repo files directly."
-            exit 0
-          fi
-          mkdir -p extracted
-          for z in "${zips[@]}"; do
-            dest="extracted/${z%.zip}"
-            mkdir -p "$dest"
-            echo "ZIP: $z ($(stat -c%s "$z") bytes)"
-            set +e
-            unzip -o -q "$z" -d "$dest"
-            rc=$?
-            set -e
-            echo "unzip exit code: $rc"
-            if [ $rc -gt 1 ]; then
-              echo "::warning::$z looks incomplete/corrupted. Re-upload the ZIP."
-              7z x -y -o"$dest" "$z" || true
-            fi
-            echo "Files extracted: $(find "$dest" -type f | wc -l)"
-          done
-          rm -rf extracted/*/__MACOSX
-
-      - name: Find Android project
-        run: |
-          find_project() {
-            find "$1" -maxdepth 6 \
-              \( -name node_modules -o -name .git -o -name .github -o -name build \) -prune -o \
-              \( -name gradlew -o -name settings.gradle -o -name settings.gradle.kts \) -type f -print 2>/dev/null \
-              | awk '{ n=gsub("/","/"); print n " " $0 }' | sort -n | head -n 1 | cut -d' ' -f2- | xargs -r dirname
-          }
-
-          PROJECT=""
-          if [ -d extracted ]; then
-            PROJECT="$(find_project extracted)"
-          fi
-          if [ -z "$PROJECT" ]; then
-            PROJECT="$(find_project .)"
-          fi
-
-          if [ -z "$PROJECT" ]; then
-            echo "::error::No Android project found. ZIP incomplete ya structure galat hai."
-            ls -la
-            exit 1
-          fi
-
-          echo "Android project: $PROJECT"
-          echo "PROJECT_DIR=$PROJECT" >> "$GITHUB_ENV"
-
-      - name: Setup Gradle 8.9
-        uses: gradle/actions/setup-gradle@v4
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: "8.9"
-
+          gradle-version: '8.9'
+      - uses: android-actions/setup-android@v3
       - name: Build APK
         run: |
-          cd "$PROJECT_DIR"
-          echo "sdk.dir=$ANDROID_HOME" > local.properties
-
-          # Project ka wrapper (8.7) ignore karo, hamesha Gradle 8.9 use karo
-          if [ -f gradle/wrapper/gradle-wrapper.properties ]; then
-            sed -i 's#distributionUrl=.*#distributionUrl=https\\://services.gradle.org/distributions/gradle-8.9-all.zip#' gradle/wrapper/gradle-wrapper.properties
-          fi
-
-          gradle assembleDebug --stacktrace --no-daemon
-
+          set -o pipefail
+          gradle --no-daemon --console=plain assembleDebug 2>&1 | tee build.log
+      - name: Show errors only
+        if: failure()
+        run: |
+          echo "=========== ERRORS ==========="
+          grep -E "^e: |error:|What went wrong|Execution failed|Could not " -A3 build.log | head -80 | tee errors.txt
+          { echo '### Build errors (copy from here)'; echo '```'; cat errors.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: MN-SHOT-APK
-          path: |
-            **/build/outputs/apk/**/*.apk
-          if-no-files-found: error
-          retention-days: 14
+          name: MN-SHOT-Native-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
