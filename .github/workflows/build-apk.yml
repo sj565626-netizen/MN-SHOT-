@@ -8,6 +8,28 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Unpack project zip and locate project
+        id: loc
+        run: |
+          zipfound=""
+          while IFS= read -r z; do
+            unzip -l "$z" > /tmp/zl.txt 2>/dev/null || true
+            if grep -q "app/src/main/java/com/mnshot/nativeapp/MainActivity.kt" /tmp/zl.txt; then zipfound="$z"; fi
+          done < <(find . -name '*.zip' -not -path './.git/*' | sort)
+          if [ -n "$zipfound" ]; then
+            echo "Using zip: $zipfound"
+            rm -rf /tmp/proj && mkdir -p /tmp/proj
+            unzip -q -o "$zipfound" -d /tmp/proj
+            src=/tmp/proj
+          else
+            echo "No project zip found, looking for extracted files"
+            src=.
+          fi
+          p=$(find "$src" -path '*/app/src/main/java/com/mnshot/nativeapp/MainActivity.kt' | head -1)
+          if [ -z "$p" ]; then echo "Native project not found. Repo files:"; find . -maxdepth 3 -not -path './.git/*' | head -60; exit 1; fi
+          root="${p%/app/src/main/java/com/mnshot/nativeapp/MainActivity.kt}"
+          echo "Project root: $root"
+          echo "dir=$(cd "$root" && pwd)" >> "${GITHUB_OUTPUT:-/dev/stdout}"
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -18,11 +40,13 @@ jobs:
       - name: Accept Android licenses
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
       - name: Build APK
+        working-directory: ${{ steps.loc.outputs.dir }}
         run: |
           set -o pipefail
           gradle --no-daemon --console=plain assembleDebug 2>&1 | tee build.log
       - name: Show errors only
         if: failure()
+        working-directory: ${{ steps.loc.outputs.dir }}
         run: |
           echo "=========== ERRORS ==========="
           grep -E "^e: |error:|What went wrong|Execution failed|Could not " -A3 build.log | head -80 | tee errors.txt
@@ -31,4 +55,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: MN-SHOT-Native-debug-apk
-          path: app/build/outputs/apk/debug/*.apk
+          path: ${{ steps.loc.outputs.dir }}/app/build/outputs/apk/debug/*.apk
